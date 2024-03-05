@@ -1,8 +1,9 @@
+import time
 import sqlite3 as sq
 import telebot as tel
 from telebot import types as t
 
-bot=tel.TeleBot('YOUR_API_TOKEN')
+bot = tel.TeleBot('YOUR_API_TOKEN')
 
 #Создание бд бота
 def create_table():
@@ -11,7 +12,8 @@ def create_table():
         cur.execute('''CREATE TABLE IF NOT EXISTS Users(
                         user_id INTEGER PRIMARY KEY,
                         username TEXT,
-                        balance INTEGER
+                        balance_pumpkin INTEGER,
+                        price_per_click INTEGER
                     )''')
         con.commit()
 
@@ -37,12 +39,13 @@ def start(message):
     create_table()
     user_id = message.from_user.id
     username = message.from_user.username
+    balance_pumpkin=0
     if user_exists(username):
         bot.send_message(message.chat.id, "Здравствуй,"+username+",выбери действие",reply_markup=markup_start)
     else:
         with sq.connect('users.db') as con:
             cur = con.cursor()
-            cur.execute("INSERT INTO Users(user_id,username,balance) VALUES(?,?,0)", (user_id,username,))
+            cur.execute("INSERT INTO Users(user_id,username,balance_pumpkin,price_per_click) VALUES(?,?,?,10)", (user_id,username,balance_pumpkin))
             con.commit()
             bot.send_message(message.chat.id, f"Привет, {username}! Ты добавлен в базу данных.")
             
@@ -108,15 +111,120 @@ def reaction_for_click_button(message):
     conn = sq.connect('users.db')
     cursor = conn.cursor()
     #Обновление баланса юзера в базе данных
-    cursor.execute('UPDATE Users SET balance = balance+? WHERE user_id = ?', (price_per_click,user_id,))
-    bot.send_message(user_id, "Твой баланс пополнен на 10.",reply_markup=markup_removes)
+    cursor.execute('UPDATE Users SET balance_pumpkin = balance_pumpkin+? WHERE user_id = ?', (price_per_click,user_id,))
+    bot.send_message(user_id, f"Твой баланс пополнен на,{price_per_click}",reply_markup=markup_removes)
 
     #Показ баланса юзера
-    cursor.execute('SELECT balance FROM Users WHERE user_id = ?', (user_id,))
+    
+    cursor.execute('SELECT balance_pumpkin FROM Users WHERE user_id = ?', (user_id,))
     result = cursor.fetchone()
     balance = result[0] if result else 0
     bot.send_message(user_id, f"Твой текущий баланс: {balance}",reply_markup=markup_button_clicker)
     conn.commit()
     conn.close()
 
+#Обработка просьбы о переводе от юзера
+def pay_command(message):
+    if len(message.text.split()) != 3:
+        bot.send_message(message.chat.id, "Используйте /pay <ник> <сумма>")
+        return
+
+    sender_username = message.from_user.username
+    recipient_username = message.text.split()[1]
+    transfer_amount = int(message.text.split()[2])
+
+    if sender_username == recipient_username:
+        bot.send_message(message.chat.id, "Вы не можете перевести средства самому себе")
+        return
+
+    sender_balance = get_user_balance(sender_username)
+
+    if sender_balance <= 0:
+        bot.send_message(message.chat.id, "У вас нет средств для перевода")
+        return
+    elif sender_balance < transfer_amount:
+        transfer_amount = sender_balance  
+
+    if user_exists(recipient_username):
+        decrease_balance(sender_username, transfer_amount)
+        increase_balance(recipient_username, transfer_amount)
+
+        send_notification(sender_username, recipient_username, transfer_amount)
+
+        bot.send_message(
+            message.chat.id,
+            f"Средства успешно переведены пользователю {recipient_username}"
+        )
+    else:
+        bot.send_message(message.chat.id, "Пользователь не найден. Попробуйте еще раз")
+@bot.message_handler(commands=['pay'])
+def pay_command(message):
+    if len(message.text.split()) != 3:
+        bot.send_message(message.chat.id, "Используйте /pay <ник> <сумма>")
+        return
+
+    sender_username = message.from_user.username
+    recipient_username = message.text.split()[1]
+    transfer_amount = int(message.text.split()[2])
+
+    if sender_username == recipient_username:
+        bot.send_message(message.chat.id, "Вы не можете перевести средства самому себе")
+        return
+
+    sender_balance = get_user_balance(sender_username)
+
+    if sender_balance <= 0:
+        bot.send_message(message.chat.id, "У вас нет средств для перевода")
+        return
+    elif sender_balance < transfer_amount:
+        transfer_amount = sender_balance  # Переводим всю доступную сумму
+
+    if user_exists(recipient_username):
+        decrease_balance(sender_username, transfer_amount)
+        increase_balance(recipient_username, transfer_amount)
+
+        send_notification(sender_username, recipient_username, transfer_amount)
+
+        bot.send_message(
+            message.chat.id,
+            f"Средства успешно переведены пользователю {recipient_username}"
+        )
+    else:
+        bot.send_message(message.chat.id, "Пользователь не найден. Попробуйте еще раз")
+
+def send_notification(sender, recipient, amount):
+    recipient_id = get_user_id(recipient)
+    if recipient_id:
+        bot.send_message(recipient_id, f"Вам было отправлено {amount} от пользователя {sender}")
+
+def get_user_id(username):
+    with sq.connect('users.db') as con:
+        cur = con.cursor()
+        cur.execute("SELECT user_id FROM Users WHERE username = ?", (username,))
+        result = cur.fetchone()
+        if result:
+            return result[0]
+    return None
+
+def decrease_balance(username, amount):
+    with sq.connect('users.db') as con:
+        cur = con.cursor()
+        cur.execute("UPDATE Users SET balance_pumpkin = balance_pumpkin - ? WHERE username = ?", (amount, username))
+        con.commit()
+
+def increase_balance(username, amount):
+    with sq.connect('users.db') as con:
+        cur = con.cursor()
+        cur.execute("UPDATE Users SET balance_pumpkin = balance_pumpkin + ? WHERE username = ?", (amount, username))
+        con.commit()
+
+def get_user_balance(username):
+    with sq.connect('users.db') as con:
+        cur = con.cursor()
+        cur.execute("SELECT balance FROM Users WHERE username = ?", (username,))
+        result = cur.fetchone()
+        return result[0] if result else 0
+    
+
 bot.polling()
+
